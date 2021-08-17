@@ -10,21 +10,36 @@
 #define LED_BUILTIN 2
 #define LED_TIMER 500
 
-//#define ENABLE_MPU6050 //if want use oled,turn on this macro
-#define ENABLE_OLED //if want use oled,turn on this macro
+#define BUTTON1_PIN 34
+#define BUTTON2_PIN 35
+#define BUTTON3_PIN 5
+int button1 = false;
+int button2 = false;
+int button3 = false;
+
+#define ENABLE_OLED       // if we want use OLED, turn on this macro
+//#define ENABLE_MPU6050  // if want use MPU6050, turn on this macro
+#define ENABLE_GPS        // if want use ENABLE_GPS
 
 #if defined(ENABLE_OLED) || defined(ENABLE_MPU6050)
   #include <Wire.h>
 #endif
 
 #ifdef ENABLE_OLED
-// oled
-#include "SSD1306Wire.h"
-#define OLED_ADDRESS 0x3c
-#define I2C_SDA 14
-#define I2C_SCL 15
-SSD1306Wire display(OLED_ADDRESS, SDA, SCL, GEOMETRY_128_64);
-bool hasDisplay = false; // we probe for the device at runtime
+  // oled
+  #include "SSD1306Wire.h"
+  #define OLED_ADDRESS 0x3c
+  #define I2C_SDA 14
+  #define I2C_SCL 15
+  SSD1306Wire display(OLED_ADDRESS, SDA, SCL, GEOMETRY_128_64);
+  bool hasDisplay = false; // we probe for the device at runtime
+#endif
+
+#ifdef ENABLE_GPS
+  #include <TinyGPS++.h>
+  #define RXD2 16
+  #define TXD2 17
+  TinyGPSPlus gps;
 #endif
 
 #include "pid.h"
@@ -98,6 +113,8 @@ int speedOsLastPulses = 0;
 #include <std_msgs/String.h>
 #include <geometry_msgs/Twist.h>
 
+#include <std_msgs/Int16.h>
+
 // Set the rosserial socket server IP address
 //IPAddress server(192,168,1,64);
 int serverIp = 60; // 64
@@ -112,9 +129,9 @@ ros::Publisher encoderPublisher("wheel", &encoderLeftPulsesPub);
 #define ENCODER_PUB_TIMER 100
 
 // mcu ip publisher
-std_msgs::String ip_msg;
-ros::Publisher ipPublisher("mcu_ip", &ip_msg);
-#define IP_PUB_TIMER 10000
+//std_msgs::String ip_msg;
+//ros::Publisher ipPublisher("mcu_ip", &ip_msg);
+//#define IP_PUB_TIMER 10000
 
 void encoderPub() {
 	static long unsigned int encoderPubTimer = 0;
@@ -125,6 +142,7 @@ void encoderPub() {
 	}
 }
 
+/*
 void ipPub() {
 	static long unsigned int ipPubTimer = 0;
 	if(millis() >= ipPubTimer) {
@@ -133,6 +151,7 @@ void ipPub() {
 		ipPublisher.publish( &ip_msg );
 	}
 }
+*/
 
 float steering_angle = 0;
 float velocity_target = 0;
@@ -143,38 +162,10 @@ float twist_linear = 0;
 long unsigned int secondTimer = 0;
 long unsigned int loopInfoTimer = 0;
 
-void twistMsgCb(const geometry_msgs::Twist& msg) {
-	
-	int encoderPulsesTarget = 0;
+void setPidTarget() {
+  int encoderPulsesTarget = 0;
 
-	velocity_target = msg.linear.x;
-	twist_linear = msg.linear.x;
-	twist_angular = msg.angular.z;
-
-	if(velocity_target == 0 || msg.angular.z == 0) {
-		steering_angle = 0;
-	} else {
-		float radius = velocity_target / msg.angular.z;
-		steering_angle = atan(wheelbase / radius);
-	}
-
-	steering_angle = -steering_angle;
-
-	// dx = (l + r) / 2
-	// dr = (r - l) / w
-	//float speed_wish_right = (cmd_vel.angle*WHEEL_DIST)/2 + cmd_vel.speed;
-	//float speed_wish_left = velocity_target * 2 - speed_wish_right;
-
-	leftSpeedPidSetPointTmp = velocity_target * 2 - ((msg.angular.z * (wheelbase * 0.5)) / 2 + velocity_target);
-
-	/*
-	Serial.print(leftSpeedPidSetPointTmp);
-	Serial.print("\t");
-	*/
-
-	leftSpeedPidSetPointTmp = (leftSpeedPidSetPointTmp * ppm) / SPEED_PID_SAMPLE_FREQ;
-
-	leftSpeedPidSetPointTmp = -leftSpeedPidSetPointTmp;
+  leftSpeedPidSetPointTmp = -leftSpeedPidSetPointTmp;
 
 	/*
 	Serial.print(leftSpeedPidSetPointTmp);
@@ -221,11 +212,56 @@ void twistMsgCb(const geometry_msgs::Twist& msg) {
 		// debug only
 		encoderLeftPulsesTargetStart = 0;
 	}
+}
+
+void twistMsgCb(const geometry_msgs::Twist& msg) {
+	
+	velocity_target = msg.linear.x;
+	twist_linear = msg.linear.x;
+	twist_angular = msg.angular.z;
+
+	if(velocity_target == 0 || msg.angular.z == 0) {
+		steering_angle = 0;
+	} else {
+		float radius = velocity_target / msg.angular.z;
+		steering_angle = atan(wheelbase / radius);
+	}
+
+	steering_angle = -steering_angle;
+
+	// dx = (l + r) / 2
+	// dr = (r - l) / w
+	//float speed_wish_right = (cmd_vel.angle*WHEEL_DIST)/2 + cmd_vel.speed;
+	//float speed_wish_left = velocity_target * 2 - speed_wish_right;
+
+	leftSpeedPidSetPointTmp = velocity_target * 2 - ((msg.angular.z * (wheelbase * 0.5)) / 2 + velocity_target);
+
+	/*
+	Serial.print(leftSpeedPidSetPointTmp);
+	Serial.print("\t");
+	*/
+
+	leftSpeedPidSetPointTmp = (leftSpeedPidSetPointTmp * ppm) / SPEED_PID_SAMPLE_FREQ;
+
+	setPidTarget();
 
 }
 
 ros::Subscriber<geometry_msgs::Twist> cmdVelSubscribe("cmd_vel", &twistMsgCb);
 // eof:ROS
+
+void servo_dir( const std_msgs::Int16 & cmd_msg){
+  servo1.write(cmd_msg.data); // servo angle, range 0-180  
+}
+
+ros::Subscriber<std_msgs::Int16> sub_dir("pub_dir", servo_dir);
+
+void motor_vel( const std_msgs::Int16 & cmd_msg){
+  leftSpeedPidSetPointTmp = (cmd_msg.data * ppm) / SPEED_PID_SAMPLE_FREQ;
+  setPidTarget(); 
+}
+
+ros::Subscriber<std_msgs::Int16> sub_vel("pub_vel", motor_vel);
 
 
 IRAM_ATTR void encoderLeftCounterA() {
@@ -416,6 +452,11 @@ void setup() {
   // led config
   pinMode(LED_BUILTIN, OUTPUT);
 
+  // button config
+  pinMode(BUTTON1_PIN, INPUT);
+  pinMode(BUTTON2_PIN, INPUT);
+  pinMode(BUTTON3_PIN, INPUT);
+
   // serial config
   Serial.begin(115200);
   Serial.println("Booting");
@@ -430,6 +471,11 @@ void setup() {
         display.setContrast(255);
     }  
     lcdMessage(1, 0, "booting");
+  #endif
+
+  #ifdef ENABLE_GPS
+    // serial link to GPS
+    Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
   #endif
 
 	// motor settings	
@@ -606,9 +652,11 @@ void setup() {
 
 	nh.subscribe(cmdVelSubscribe);
 	nh.advertise(encoderPublisher);
-	nh.advertise(ipPublisher);
+	//nh.advertise(ipPublisher);
+  nh.subscribe(sub_dir);
+  nh.subscribe(sub_vel);
 
-	ipPub();
+	//ipPub();
 	// eof:ROS
 
 	// left speed PID
@@ -729,9 +777,39 @@ void loop() {
 		
 	}
 
+  #ifdef ENABLE_GPS
+    while (Serial2.available() > 0)
+      if (gps.encode(Serial2.read())) {
+        Serial.print(F("Location: ")); 
+        if (gps.location.isValid()) {
+          Serial.print(gps.location.lat(), 6);
+          Serial.print(F(","));
+          Serial.print(gps.location.lng(), 6);
+        } else {
+          Serial.print(F("INVALID"));
+        }        
+      }
+
+    if (millis() > 5000 && gps.charsProcessed() < 10) {
+      Serial.println(F("No GPS detected: check wiring."));
+      while(true);
+    }
+  #endif
+
 	// publish
 	encoderPub();
-	ipPub();
+	//ipPub();
+
+  if ( digitalRead(BUTTON1_PIN) == HIGH ) { 
+    Serial.println("button1_state = HIGH");
+  }
+  if ( digitalRead(BUTTON2_PIN) == HIGH ) { 
+    Serial.println("button2_state = HIGH");
+  }
+  if ( digitalRead(BUTTON3_PIN) == HIGH ) { 
+    Serial.println("button3_state = HIGH");
+  }
+
 
   blinkLedBuiltin();
 
