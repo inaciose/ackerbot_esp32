@@ -40,6 +40,8 @@ int button3 = false;
   #define RXD2 16
   #define TXD2 17
   TinyGPSPlus gps;
+  double gps_lat = 0;
+  double gps_lng = 0;
 #endif
 
 #include "pid.h"
@@ -114,6 +116,8 @@ int speedOsLastPulses = 0;
 #include <geometry_msgs/Twist.h>
 
 #include <std_msgs/Int16.h>
+//#include <std_msgs/Int16MultiArray.h>
+#include <std_msgs/Float32MultiArray.h>
 
 // Set the rosserial socket server IP address
 //IPAddress server(192,168,1,64);
@@ -152,6 +156,32 @@ void ipPub() {
 	}
 }
 */
+
+// gps ip publisher
+//std_msgs::Int16MultiArray gps_data;
+std_msgs::Float32MultiArray gps_data;
+ros::Publisher gpsPublisher("gps_raw", &gps_data);
+#define GPS_PUB_TIMER 100
+
+void gpsPub() {
+	static long unsigned int gpsPubTimer = 0;
+	if(millis() >= gpsPubTimer) {
+		gpsPubTimer = millis() + GPS_PUB_TIMER;
+
+    /*
+    int values[3] = {gps_lat * 100000, gps_lng * 100000, 0};
+    gps_data.data = (std_msgs::Int16MultiArray::_data_type *)values;
+    gps_data.data_length = 3;
+    */
+
+    float values[3] = {(float)gps_lat, (float)gps_lng, 0};
+    gps_data.data = (std_msgs::Float32MultiArray::_data_type *)values;
+    //gps_data.layout.dim_length = 1;
+    gps_data.data_length = 3;
+
+		gpsPublisher.publish( &gps_data );
+	}
+}
 
 float steering_angle = 0;
 float velocity_target = 0;
@@ -262,7 +292,6 @@ void motor_vel( const std_msgs::Int16 & cmd_msg){
 }
 
 ros::Subscriber<std_msgs::Int16> sub_vel("pub_vel", motor_vel);
-
 
 IRAM_ATTR void encoderLeftCounterA() {
   // look for a low-to-high on channel A
@@ -652,7 +681,7 @@ void setup() {
 
 	nh.subscribe(cmdVelSubscribe);
 	nh.advertise(encoderPublisher);
-	//nh.advertise(ipPublisher);
+	nh.advertise(gpsPublisher);
   nh.subscribe(sub_dir);
   nh.subscribe(sub_vel);
 
@@ -780,13 +809,14 @@ void loop() {
   #ifdef ENABLE_GPS
     while (Serial2.available() > 0)
       if (gps.encode(Serial2.read())) {
-        Serial.print(F("Location: ")); 
         if (gps.location.isValid()) {
-          Serial.print(gps.location.lat(), 6);
+          gps_lat = gps.location.lat();
+          gps_lng = gps.location.lng();
+          Serial.print(gps_lat, 6);
           Serial.print(F(","));
-          Serial.print(gps.location.lng(), 6);
+          Serial.println(gps_lng, 6);
         } else {
-          Serial.print(F("INVALID"));
+          Serial.println(F("gps invalid, wait for sattelites"));
         }        
       }
 
@@ -798,7 +828,7 @@ void loop() {
 
 	// publish
 	encoderPub();
-	//ipPub();
+	gpsPub();
 
   if ( digitalRead(BUTTON1_PIN) == HIGH ) { 
     Serial.println("button1_state = HIGH");
