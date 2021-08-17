@@ -1,3 +1,11 @@
+// ###########     ATENTION - ATENTION     ########################
+// if give an error about BUFFER_LENGTH on compilation
+// on library file MPU6050.cpp, insert the following line
+// #define BUFFER_LENGTH 32
+// at the top or just before the following line (near 2751)
+//int8_t MPU6050::GetCurrentFIFOPacket(uint8_t *data, uint8_t length) { // overflow proof
+// ################################################################
+
 #include <Arduino.h>
 
 #include <WiFi.h>
@@ -17,12 +25,43 @@ int button1 = false;
 int button2 = false;
 int button3 = false;
 
-#define ENABLE_OLED       // if we want use OLED, turn on this macro
-//#define ENABLE_MPU6050  // if want use MPU6050, turn on this macro
-#define ENABLE_GPS        // if want use ENABLE_GPS
+#define ENABLE_OLED       // if use OLED
+#define ENABLE_MPU6050    // if use MPU6050
+#define ENABLE_GPS        // if use ENABLE_GPS
 
 #if defined(ENABLE_OLED) || defined(ENABLE_MPU6050)
   #include <Wire.h>
+#endif
+
+#ifdef ENABLE_MPU6050
+// mpu6050
+#define M_PI 3.14159265358979323846
+#define __PGMSPACE_H_ 1 // stop compile errors of redefined typedefs and defines with ESP32-Arduino
+
+// I2Cdev and MPU6050 must be installed as libraries, or else the .cpp/.h files
+// for both classes must be in the include path of your project
+#include "I2Cdev.h"
+#include "MPU6050_6Axis_MotionApps20.h"
+
+MPU6050 mpu;
+
+#define OUTPUT_READABLE_YAWPITCHROLL
+#define DMP_INTERRUPT_PIN GPIO_NUM_13
+
+// MPU control/status vars
+bool dmpReady = false;  // set true if DMP init was successful
+uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
+uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
+uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
+uint16_t fifoCount;     // count of all bytes currently in FIFO
+uint8_t fifoBuffer[64]; // FIFO storage buffer
+
+// orientation/motion vars
+Quaternion q;           // [w, x, y, z]         quaternion container
+VectorFloat gravity;    // [x, y, z]            gravity vector
+float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
+
+volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
 #endif
 
 #ifdef ENABLE_OLED
@@ -293,6 +332,14 @@ void motor_vel( const std_msgs::Int16 & cmd_msg){
 
 ros::Subscriber<std_msgs::Int16> sub_vel("pub_vel", motor_vel);
 
+#ifdef ENABLE_MPU6050
+// mpu6050
+// dmp isr
+static void IRAM_ATTR dmpDataReady(void * arg) {
+    mpuInterrupt = true;
+}
+#endif
+
 IRAM_ATTR void encoderLeftCounterA() {
   // look for a low-to-high on channel A
   if (digitalRead(ENCODER_LEFT_PINA) == HIGH) {
@@ -447,6 +494,33 @@ void update_PID() {
 */	
   }
 }
+
+#ifdef ENABLE_MPU6050
+void mpuDMP() {
+    static uint32_t timer = millis();
+
+    // if programming failed, don't try to do anything
+    if (!dmpReady) return;
+    // read a packet from FIFO
+    if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) { // Get the Latest packet 
+        if(millis() > timer) {
+            timer = millis()+50;
+        #ifdef OUTPUT_READABLE_YAWPITCHROLL
+            // display Euler angles in degrees
+            mpu.dmpGetQuaternion(&q, fifoBuffer);
+            mpu.dmpGetGravity(&gravity, &q);
+            mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+            Serial.print("ypr\t");
+            Serial.print(ypr[0] * 180/M_PI);
+            Serial.print("\t");
+            Serial.print(ypr[1] * 180/M_PI);
+            Serial.print("\t");
+            Serial.println(ypr[2] * 180/M_PI);
+        #endif
+        }
+    }
+}
+#endif
 
 void lcdMessage(int cls, int line, String msg) {
   #ifdef ENABLE_OLED
@@ -670,6 +744,100 @@ void setup() {
 	attachInterrupt(ENCODER_LEFT_PINA, ENCODER_LEFT_FUNCTIONA, ENCODER_LEFT_SIGNAL);
 	attachInterrupt(ENCODER_LEFT_PINB, ENCODER_LEFT_FUNCTIONB, ENCODER_LEFT_SIGNAL);
 
+  #ifdef ENABLE_MPU6050
+    // mpu6050
+    // initialize device
+    Serial.println(F("First MPU6050 initialization ..."));
+    mpu.initialize();
+    delay(100);
+
+    Serial.println(F("MPU6050 reset..."));
+    mpu.reset(); //help startup reliably - doesn't always work though.
+    // maybe can also reset i2c on esp32?
+    delay(100);
+
+    Serial.println(F("MPU6050 resetI2CMaster..."));
+    mpu.resetI2CMaster();
+    delay(100);
+
+    // initialize device again
+    Serial.println(F("Final MPU6050 initialization..."));
+    mpu.initialize();
+    
+    pinMode(DMP_INTERRUPT_PIN, INPUT);
+
+    // verify connection
+    Serial.println(F("Testing device connections..."));
+    Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+
+    // wait for ready
+    //Serial.println(F("\nSend any character to begin DMP programming and demo: "));
+    //while (Serial.available() && Serial.read()); // empty buffer
+    //while (!Serial.available());                 // wait for data
+    //while (Serial.available() && Serial.read()); // empty buffer again
+    delay(250);
+
+    // load and configure the DMP
+    Serial.println(F("Initializing DMP..."));
+    devStatus = mpu.dmpInitialize();
+
+    // supply your own gyro offsets here, scaled for min sensitivity
+    mpu.setXGyroOffset(220);
+    mpu.setYGyroOffset(76);
+    mpu.setZGyroOffset(-85);
+    mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
+
+    // make sure it worked (returns 0 if so)
+    if (devStatus == 0) {
+        // Calibration Time: generate offsets and calibrate our MPU6050
+        mpu.CalibrateAccel(6);
+        mpu.CalibrateGyro(6);
+        mpu.PrintActiveOffsets();
+        // turn on the DMP, now that it's ready
+        Serial.println(F("Enabling DMP..."));
+        mpu.setDMPEnabled(true);
+
+        /*
+        // enable Arduino interrupt detection
+        Serial.print(F("Enabling interrupt detection (mcu external interrupt "));
+        Serial.print(digitalPinToInterrupt(DMP_INTERRUPT_PIN));
+        Serial.println(F(")..."));
+        attachInterrupt(digitalPinToInterrupt(DMP_INTERRUPT_PIN), dmpDataReady, RISING);
+        mpuIntStatus = mpu.getIntStatus();
+        // set our DMP Ready flag so the main loop() function knows it's okay to use it
+        Serial.println(F("DMP ready! Waiting for first interrupt..."));
+        */
+
+        esp_err_t err;
+
+        err = gpio_isr_handler_add(DMP_INTERRUPT_PIN, &dmpDataReady, (void *) 13);
+        if (err != ESP_OK) {
+            Serial.printf("handler add failed with error 0x%x \r\n", err);
+        }
+
+        err = gpio_set_intr_type(DMP_INTERRUPT_PIN, GPIO_INTR_POSEDGE);
+        if (err != ESP_OK) {
+            Serial.printf("set intr type failed with error 0x%x \r\n", err);
+        }
+
+        dmpReady = true;
+
+        // get expected DMP packet size for later comparison
+        packetSize = mpu.dmpGetFIFOPacketSize();
+        fifoCount = mpu.getFIFOCount();
+
+
+    } else {
+        // ERROR!
+        // 1 = initial memory load failed
+        // 2 = DMP configuration updates failed
+        // (if it's going to break, usually the code will be 1)
+        Serial.print(F("DMP Initialization failed (code "));
+        Serial.print(devStatus);
+        Serial.println(F(")"));
+    }
+  #endif
+
 	// bof:ROS
 	// Set the connection to rosserial socket server
 	nh.getHardware()->setConnection(server, serverPort);
@@ -826,9 +994,9 @@ void loop() {
     }
   #endif
 
-	// publish
-	encoderPub();
-	gpsPub();
+  #ifdef ENABLE_MPU6050    
+    mpuDMP();
+  #endif
 
   if ( digitalRead(BUTTON1_PIN) == HIGH ) { 
     Serial.println("button1_state = HIGH");
@@ -840,6 +1008,9 @@ void loop() {
     Serial.println("button3_state = HIGH");
   }
 
+	// publish
+	encoderPub();
+	gpsPub();
 
   blinkLedBuiltin();
 
