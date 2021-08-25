@@ -27,7 +27,7 @@ int button3 = false;
 
 #define ENABLE_OLED       // if use OLED
 #define ENABLE_MPU6050    // if use MPU6050
-#define ENABLE_GPS        // if use ENABLE_GPS
+//#define ENABLE_GPS        // if use ENABLE_GPS
 
 #if defined(ENABLE_OLED) || defined(ENABLE_MPU6050)
   #include <Wire.h>
@@ -196,31 +196,34 @@ void ipPub() {
 }
 */
 
-// gps ip publisher
-//std_msgs::Int16MultiArray gps_data;
-std_msgs::Float32MultiArray gps_data;
-ros::Publisher gpsPublisher("gps_raw", &gps_data);
-#define GPS_PUB_TIMER 100
+#ifdef ENABLE_GPS
+  // gps ip publisher
+  //std_msgs::Int16MultiArray gps_data;
+  std_msgs::Float32MultiArray gps_data;
+  ros::Publisher gpsPublisher("gps_raw", &gps_data);
+  #define GPS_PUB_TIMER 100
 
-void gpsPub() {
-	static long unsigned int gpsPubTimer = 0;
-	if(millis() >= gpsPubTimer) {
-		gpsPubTimer = millis() + GPS_PUB_TIMER;
+  void gpsPub() {
+    static long unsigned int gpsPubTimer = 0;
+    if(millis() >= gpsPubTimer) {
+      gpsPubTimer = millis() + GPS_PUB_TIMER;
 
-    /*
-    int values[3] = {gps_lat * 100000, gps_lng * 100000, 0};
-    gps_data.data = (std_msgs::Int16MultiArray::_data_type *)values;
-    gps_data.data_length = 3;
-    */
+      /*
+      int values[3] = {gps_lat * 100000, gps_lng * 100000, 0};
+      gps_data.data = (std_msgs::Int16MultiArray::_data_type *)values;
+      gps_data.data_length = 3;
+      */
 
-    float values[3] = {(float)gps_lat, (float)gps_lng, 0};
-    gps_data.data = (std_msgs::Float32MultiArray::_data_type *)values;
-    //gps_data.layout.dim_length = 1;
-    gps_data.data_length = 3;
+      float values[3] = {(float)gps_lat, (float)gps_lng, 0};
+      gps_data.data = (std_msgs::Float32MultiArray::_data_type *)values;
+      //gps_data.layout.dim_length = 1;
+      gps_data.data_length = 3;
 
-		gpsPublisher.publish( &gps_data );
-	}
-}
+      gpsPublisher.publish( &gps_data );
+    }
+  }
+#endif
+
 
 float steering_angle = 0;
 float velocity_target = 0;
@@ -236,13 +239,7 @@ void setPidTarget() {
 
   leftSpeedPidSetPointTmp = -leftSpeedPidSetPointTmp;
 
-	/*
-	Serial.print(leftSpeedPidSetPointTmp);
-	Serial.println("\n");
-	*/
-
 	// pid
-	//leftSpeedPidSetPointTmp = velocity_target;
 	// set left motors direction and speed
 	if(leftSpeedPidSetPointTmp > 0) {
 		leftSpeedPidSetPointDirection = 1;
@@ -256,8 +253,6 @@ void setPidTarget() {
 	}
 
 	leftSpeedPid.SetMode(AUTOMATIC);
-	//useSteeringPid = false;
-	//encoderLeftPulsesSteeringPID = encoderRightPulsesSteeringPID = 0;
 
 	// set the target for encoders if any
 	if(encoderPulsesTarget) {
@@ -317,7 +312,6 @@ void twistMsgCb(const geometry_msgs::Twist& msg) {
 }
 
 ros::Subscriber<geometry_msgs::Twist> cmdVelSubscribe("cmd_vel", &twistMsgCb);
-// eof:ROS
 
 void servo_dir( const std_msgs::Int16 & cmd_msg){
   servo1.write(cmd_msg.data); // servo angle, range 0-180  
@@ -331,6 +325,7 @@ void motor_vel( const std_msgs::Int16 & cmd_msg){
 }
 
 ros::Subscriber<std_msgs::Int16> sub_vel("pub_vel", motor_vel);
+// eof:ROS
 
 #ifdef ENABLE_MPU6050
 // mpu6050
@@ -849,7 +844,9 @@ void setup() {
 
 	nh.subscribe(cmdVelSubscribe);
 	nh.advertise(encoderPublisher);
-	nh.advertise(gpsPublisher);
+  #ifdef ENABLE_GPS
+	  nh.advertise(gpsPublisher);
+  #endif
   nh.subscribe(sub_dir);
   nh.subscribe(sub_vel);
 
@@ -871,8 +868,7 @@ void loop() {
 
 	servo1Angle = map(steering_angle*100, -156, 156, 50, 130);  // scale it to use it with the servo (value between 0 and 180)
 	
-	//servo1Angle -= 0; // go straight compensation
-
+  // steering limits
 	if(servo1Angle < 60) servo1Angle = 60;
 	if(servo1Angle > 120) servo1Angle = 120;
 
@@ -1010,7 +1006,10 @@ void loop() {
 
 	// publish
 	encoderPub();
-	gpsPub();
+
+  #ifdef ENABLE_GPS
+    gpsPub();
+  #endif
 
   blinkLedBuiltin();
 
