@@ -90,6 +90,7 @@ volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin h
 Servo servo1;
 int servo1Angle = 90;
 int servo1Pin = 15;
+int twist_mode = 1;
 
 // bridge-h
 int ENA = 27;
@@ -160,7 +161,7 @@ int speedOsLastPulses = 0;
 
 // Set the rosserial socket server IP address
 //IPAddress server(192,168,1,64);
-int serverIp = 60; // 64
+int serverIp = 64; // 64
 // Set the rosserial socket server port
 const uint16_t serverPort = 11411;
 
@@ -279,6 +280,9 @@ void setPidTarget() {
 }
 
 void twistMsgCb(const geometry_msgs::Twist& msg) {
+
+  // working in dirvel mode
+  if(!twist_mode) return;
 	
 	velocity_target = msg.linear.x;
 	twist_linear = msg.linear.x;
@@ -298,7 +302,7 @@ void twistMsgCb(const geometry_msgs::Twist& msg) {
 	//float speed_wish_right = (cmd_vel.angle*WHEEL_DIST)/2 + cmd_vel.speed;
 	//float speed_wish_left = velocity_target * 2 - speed_wish_right;
 
-	leftSpeedPidSetPointTmp = velocity_target * 2 - ((msg.angular.z * (wheelbase * 0.5)) / 2 + velocity_target);
+	leftSpeedPidSetPointTmp = velocity_target * 2 - ((msg.angular.z * (wheelbase)) / 2 + velocity_target);
 
 	/*
 	Serial.print(leftSpeedPidSetPointTmp);
@@ -314,13 +318,16 @@ void twistMsgCb(const geometry_msgs::Twist& msg) {
 ros::Subscriber<geometry_msgs::Twist> cmdVelSubscribe("cmd_vel", &twistMsgCb);
 
 void servo_dir( const std_msgs::Int16 & cmd_msg){
-  servo1.write(cmd_msg.data); // servo angle, range 0-180  
+  servo1.write(cmd_msg.data); // servo angle, range 0-180
+  servo1Angle = cmd_msg.data;  
+  twist_mode = 0;
 }
 
 ros::Subscriber<std_msgs::Int16> sub_dir("pub_dir", servo_dir);
 
 void motor_vel( const std_msgs::Int16 & cmd_msg){
-  leftSpeedPidSetPointTmp = (cmd_msg.data * ppm) / SPEED_PID_SAMPLE_FREQ;
+  velocity_target = cmd_msg.data / 1000.0;	
+  leftSpeedPidSetPointTmp = (cmd_msg.data * ppm / 1000.0) / SPEED_PID_SAMPLE_FREQ;
   setPidTarget(); 
 }
 
@@ -866,15 +873,17 @@ void setup() {
 void loop() {
   ArduinoOTA.handle();
 
-	servo1Angle = map(steering_angle*100, -156, 156, 50, 130);  // scale it to use it with the servo (value between 0 and 180)
-	
-  // steering limits
-	if(servo1Angle < 60) servo1Angle = 60;
-	if(servo1Angle > 120) servo1Angle = 120;
+  if(twist_mode) {
+    servo1Angle = map(steering_angle*100, -156, 156, 50, 130);  // scale it to use it with the servo (value between 0 and 180)
+    
+    // steering limits
+    if(servo1Angle < 60) servo1Angle = 60;
+    if(servo1Angle > 120) servo1Angle = 120;
 
-	if(twist_linear == 0 || twist_linear > 0.02) {
-		servo1.write(servo1Angle);
-	}
+    if(twist_linear == 0 || twist_linear > 0.02) {
+      servo1.write(servo1Angle);
+    }
+  }
 
 	static double encoderLeftPulsesLast = 999;
 	
