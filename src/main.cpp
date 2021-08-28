@@ -13,10 +13,14 @@
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 
-#include "wifi.h"
+#include <WiFiManager.h> 
+
+IPAddress ip;
 
 #define LED_BUILTIN 2
-#define LED_TIMER 500
+#define LED_TIMER_NOT_CONNECTED 250
+#define LED_TIMER_CONNECTED 500
+int led_time = LED_TIMER_NOT_CONNECTED;
 
 #define BUTTON1_PIN 34
 #define BUTTON2_PIN 35
@@ -129,7 +133,7 @@ long encoderRightPulsesTargetStart = 0;
 volatile long encoderLeftPulsesSpeedPID; // the number of pulses for PID
 volatile long encoderLeftPulsesSteeringPID; // the number of pulses for PID, must be reset at same time
 
-float wheelbase = 0.21; // meters
+float wheelbase = 0.20; // meters
 float wheelradius = 0.033; // meters
 
 // pulses per rotation
@@ -160,7 +164,7 @@ int speedOsLastPulses = 0;
 #include <std_msgs/Float32MultiArray.h>
 
 // Set the rosserial socket server IP address
-//IPAddress server(192,168,1,64);
+IPAddress masterip;
 int serverIp = 64; // 64
 // Set the rosserial socket server port
 const uint16_t serverPort = 11411;
@@ -303,11 +307,6 @@ void twistMsgCb(const geometry_msgs::Twist& msg) {
 	//float speed_wish_left = velocity_target * 2 - speed_wish_right;
 
 	leftSpeedPidSetPointTmp = velocity_target * 2 - ((msg.angular.z * (wheelbase)) / 2 + velocity_target);
-
-	/*
-	Serial.print(leftSpeedPidSetPointTmp);
-	Serial.print("\t");
-	*/
 
 	leftSpeedPidSetPointTmp = (leftSpeedPidSetPointTmp * ppm) / SPEED_PID_SAMPLE_FREQ;
 
@@ -539,20 +538,25 @@ void blinkLedBuiltin() {
 	static boolean ledstate = 0;
 	static long unsigned int ledTimer = 0;
 	if(millis() >= ledTimer) {
-		ledTimer = millis() + LED_TIMER;
+		ledTimer = millis() + led_time;
 		ledstate = !ledstate;
 		digitalWrite(LED_BUILTIN, ledstate);
 	}
 }
 
-void setup() {
-
-  // WIFI mode
-  int softap_mode = 0;
-  // client mode ip
+// wifi manager report ap callback
+void configModeCallback (WiFiManager *myWiFiManager) {
   IPAddress ip;
-  // access point mode ip
-  IPAddress apIP = IPAddress(192, 168, 4, 1);
+  Serial.println("Entered config mode");
+  ip = WiFi.softAPIP();
+  Serial.println(WiFi.softAPIP());
+  Serial.println(myWiFiManager->getConfigPortalSSID());
+
+  String slocalip = ip.toString();
+  lcdMessage(1, 0, slocalip);
+}
+
+void setup() {
 
   // led config
   pinMode(LED_BUILTIN, OUTPUT);
@@ -588,6 +592,7 @@ void setup() {
 	pinMode(IN1, OUTPUT);
 	pinMode(IN2, OUTPUT);
 
+  // configure PWM channel
   //ledcSetup(pwmChannel, freq, resolution);
 	ledcSetup(0, 1000, 8);
 
@@ -619,44 +624,20 @@ void setup() {
 	Serial.print("pulses per meter: ");
 	Serial.println(ppm);
 
-  // WIFI
-  if(softap_mode) {
-    const char *hostname = "akbesp";
-    lcdMessage(0, 1, "starting softAP");
-    WiFi.mode(WIFI_AP);
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    bool result = WiFi.softAP(hostname, "12345678", 1, 0);
-    if (!result) {
-      Serial.println("AP Config failed.");
-      return;
-    } else {
-      Serial.println("AP Config Success.");
-      Serial.print("AP MAC: ");
-      Serial.println(WiFi.softAPmacAddress());
-      ip = WiFi.softAPIP();
-    }
-  } else {
-    lcdMessage(0, 1, String("join ") + ssid);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, password);
-    while (WiFi.waitForConnectResult() != WL_CONNECTED)
-    {
-        delay(500);
-        Serial.print(F("."));
-    }
-    ip = WiFi.localIP();
-    Serial.println(F("WiFi connected"));
+	// WiFi manager
+	Serial.println("WiFi connecting...");
+	WiFiManager wifiManager;
+  wifiManager.setAPCallback(configModeCallback);
+	wifiManager.setConfigPortalTimeout(300);
+	wifiManager.autoConnect("espap");
+
+	while (WiFi.status() != WL_CONNECTED) {
+    	Serial.println("Connection Failed! Rebooting...");
+    	delay(5000);
+    	ESP.restart();
   }
 
-  // Port defaults to 3232
-  // ArduinoOTA.setPort(3232);
-  // Hostname defaults to esp3232-[MAC]
-  // ArduinoOTA.setHostname("myesp32");
-  // No authentication by default
-  // ArduinoOTA.setPassword("admin");
-  // Password can be set with it's md5 value as well
-  // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
-  // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
+  ip = WiFi.localIP();
 
   ArduinoOTA
     .onStart([]() {
@@ -730,9 +711,10 @@ void setup() {
 	found = slocalip.indexOf(".");
 	slocalip = slocalip.substring(0, found);
 	IPAddress server(192,168,slocalip.toInt(),serverIp);
+  masterip = server;
 	Serial.print("ROS master IP: ");
-	Serial.println(server);
-  lcdMessage(0, 1, server.toString());
+	Serial.println(masterip);
+  lcdMessage(0, 1, masterip.toString());
 
 	// servo
 	servo1.attach(servo1Pin);
@@ -1021,6 +1003,21 @@ void loop() {
   #endif
 
   blinkLedBuiltin();
+
+  // update display
+	static long unsigned int displayTimer = 0;
+	if(millis() >= displayTimer) {
+		displayTimer = millis() + 1000;
+    lcdMessage(1, 0, ip.toString());
+    lcdMessage(0, 1, masterip.toString());
+    if (!nh.connected()) {
+      lcdMessage(0, 2, "not connected");
+      led_time = LED_TIMER_NOT_CONNECTED;
+    } else {
+      lcdMessage(0, 2, "connected");
+      led_time = LED_TIMER_CONNECTED;
+    }
+  }
 
   nh.spinOnce();
 }
