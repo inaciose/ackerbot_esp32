@@ -31,7 +31,7 @@ int button3 = false;
 
 #define ENABLE_OLED       // if use OLED
 #define ENABLE_MPU6050    // if use MPU6050
-//#define ENABLE_GPS        // if use ENABLE_GPS
+#define ENABLE_GPS        // if use ENABLE_GPS
 
 #if defined(ENABLE_OLED) || defined(ENABLE_MPU6050)
   #include <Wire.h>
@@ -65,6 +65,9 @@ Quaternion q;           // [w, x, y, z]         quaternion container
 VectorFloat gravity;    // [x, y, z]            gravity vector
 float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
 
+VectorInt16 aa;         // [x, y, z]            accel sensor measurements
+VectorInt16 aaReal;     // [x, y, z]            gravity-free accel sensor measurements
+
 volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
 #endif
 
@@ -85,6 +88,15 @@ volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin h
   TinyGPSPlus gps;
   double gps_lat = 0;
   double gps_lng = 0;
+
+  unsigned int gps_time = 0;
+  double gps_speed = 0;
+  double gps_altitude = 0;
+  double gps_course = 0;
+  unsigned int gps_satellites = 0;
+  int gps_hdop = 0;
+
+  int gps_status = 1;
 #endif
 
 #include "pid.h"
@@ -104,9 +116,7 @@ int IN2 = 13;
 #define WPWMRANGE 256
 #define WPWMFREQ 1000
 int motorState = 0;
-//int motorSpeed = 0;
 signed int leftMotorPwmOut = 0;
-//signed int leftMotorPwmOutCmd = 0;
 
 // quadrature encoder
 #define ENCODER_LEFT_FUNCTIONA encoderLeftCounterA
@@ -163,6 +173,17 @@ int speedOsLastPulses = 0;
 //#include <std_msgs/Int16MultiArray.h>
 #include <std_msgs/Float32MultiArray.h>
 
+#ifdef ENABLE_GPS
+  #include <gps_common/GPSFix.h>
+  #include <gps_common/GPSStatus.h>
+  char gps_frameid[] = "gps_frame";
+#endif
+
+#ifdef ENABLE_MPU6050
+  #include <sensor_msgs/Imu.h>
+  char imu_frameid[] = "imu_frame";
+#endif
+
 // Set the rosserial socket server IP address
 IPAddress masterip;
 int serverIp = 64; // 64
@@ -170,6 +191,8 @@ int serverIp = 64; // 64
 const uint16_t serverPort = 11411;
 
 ros::NodeHandle nh;
+
+boolean ros_connected = false;
 
 // encoder pulses publisher
 std_msgs::Int32 encoderLeftPulsesPub;
@@ -202,10 +225,15 @@ void ipPub() {
 */
 
 #ifdef ENABLE_GPS
-  // gps ip publisher
+  // gps publisher
+
+  gps_common::GPSStatus gps_status_msg;
+  gps_common::GPSFix gps_msg;
+  ros::Publisher gpsPublisher("gps", &gps_msg);
+
   //std_msgs::Int16MultiArray gps_data;
   std_msgs::Float32MultiArray gps_data;
-  ros::Publisher gpsPublisher("gps_raw", &gps_data);
+  ros::Publisher gpsPublisherRaw("gps_raw", &gps_data);
   #define GPS_PUB_TIMER 100
 
   void gpsPub() {
@@ -213,18 +241,33 @@ void ipPub() {
     if(millis() >= gpsPubTimer) {
       gpsPubTimer = millis() + GPS_PUB_TIMER;
 
-      /*
-      int values[3] = {gps_lat * 100000, gps_lng * 100000, 0};
-      gps_data.data = (std_msgs::Int16MultiArray::_data_type *)values;
-      gps_data.data_length = 3;
-      */
-
       float values[3] = {(float)gps_lat, (float)gps_lng, 0};
       gps_data.data = (std_msgs::Float32MultiArray::_data_type *)values;
       //gps_data.layout.dim_length = 1;
       gps_data.data_length = 3;
 
-      gpsPublisher.publish( &gps_data );
+      //gpsPublisher.publish( &gps_data );
+
+      gps_status_msg.header.stamp = nh.now();
+      gps_status_msg.satellites_used = gps_satellites;
+      if(gps_status != 2) {
+        gps_status_msg.status = -1;
+      } else {
+        gps_status_msg.status = 0;
+      }
+
+      gps_msg.header.stamp = nh.now();
+      gps_msg.latitude = gps_lat;
+      gps_msg.longitude = gps_lng;
+      gps_msg.altitude = gps_altitude;
+      gps_msg.track = gps_course;
+      gps_msg.speed = gps_speed;
+      gps_msg.time = gps_time;
+      gps_msg.hdop = gps_hdop;
+
+      gps_msg.status = gps_status_msg;
+
+      gpsPublisher.publish( &gps_msg);
     }
   }
 #endif
@@ -497,30 +540,70 @@ void update_PID() {
 }
 
 #ifdef ENABLE_MPU6050
-void mpuDMP() {
-    static uint32_t timer = millis();
 
-    // if programming failed, don't try to do anything
-    if (!dmpReady) return;
-    // read a packet from FIFO
-    if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) { // Get the Latest packet 
-        if(millis() > timer) {
-            timer = millis()+50;
-        #ifdef OUTPUT_READABLE_YAWPITCHROLL
-            // display Euler angles in degrees
-            mpu.dmpGetQuaternion(&q, fifoBuffer);
-            mpu.dmpGetGravity(&gravity, &q);
-            mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-            Serial.print("ypr\t");
-            Serial.print(ypr[0] * 180/M_PI);
-            Serial.print("\t");
-            Serial.print(ypr[1] * 180/M_PI);
-            Serial.print("\t");
-            Serial.println(ypr[2] * 180/M_PI);
-        #endif
-        }
-    }
-}
+  // imu publisher
+  sensor_msgs::Imu imu_data;
+  ros::Publisher imuPublisher("imu", &imu_data);
+
+
+  //std_msgs::Float32MultiArray imu_data;
+  //ros::Publisher imuPublisher("imu_raw", &imu_data);
+  #define IMU_PUB_TIMER 50
+
+  void mpuDMP() {
+      static uint32_t timer = millis();
+
+      // if programming failed, don't try to do anything
+      if (!dmpReady) return;
+      // read a packet from FIFO
+      if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) { // Get the Latest packet 
+          if(millis() > timer) {
+              timer = millis() + IMU_PUB_TIMER;
+          //#ifdef OUTPUT_READABLE_YAWPITCHROLL
+              // display Euler angles in degrees
+              mpu.dmpGetQuaternion(&q, fifoBuffer);
+              mpu.dmpGetGravity(&gravity, &q);
+              mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+              Serial.print("ypr\t");
+              Serial.print(ypr[0] * 180/M_PI);
+              Serial.print("\t");
+              Serial.print(ypr[1] * 180/M_PI);
+              Serial.print("\t");
+              Serial.println(ypr[2] * 180/M_PI);
+
+              imu_data.orientation.x = q.x;
+              imu_data.orientation.y = q.y;
+              imu_data.orientation.z = q.z;
+              imu_data.orientation.w = q.w;
+
+              mpu.dmpGetQuaternion(&q, fifoBuffer);
+              mpu.dmpGetAccel(&aa, fifoBuffer);
+              mpu.dmpGetGravity(&gravity, &q);
+              mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+
+              // should be in m/s^2.
+              imu_data.linear_acceleration.x = aaReal.x * 1/16384. * 9.80665;
+              imu_data.linear_acceleration.y = aaReal.y * 1/16384. * 9.80665;
+              imu_data.linear_acceleration.z = aaReal.z * 1/16384. * 9.80665;
+
+              mpu.dmpGetQuaternion(&q, fifoBuffer);
+              mpu.dmpGetGravity(&gravity, &q);
+              mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+
+              // Should be in rad/sec.
+              imu_data.angular_velocity.x = ypr[2];
+              imu_data.angular_velocity.y = ypr[1];
+              imu_data.angular_velocity.z = ypr[0];
+
+              imu_data.header.stamp = nh.now();
+
+              imuPublisher.publish(&imu_data);
+
+
+          //#endif
+          }
+      }
+  }
 #endif
 
 void lcdMessage(int cls, int line, String msg) {
@@ -532,6 +615,37 @@ void lcdMessage(int cls, int line, String msg) {
         display.display();
     }
   #endif
+}
+
+void lcdUpdate() {
+
+	static long unsigned int displayTimer = 0;
+  static boolean info_state = 0;
+	if(millis() >= displayTimer) {
+		displayTimer = millis() + 1000;
+    info_state = !info_state;
+
+    lcdMessage(1, 0, ip.toString());
+    if(info_state) {
+      lcdMessage(0, 1, masterip.toString());
+    } else {
+      #ifdef ENABLE_GPS
+      if(gps_status == 0)
+        lcdMessage(0, 1, "gps error");
+      if(gps_status == 1)
+        lcdMessage(0, 1, "gps wait");
+      if(gps_status == 2)
+        lcdMessage(0, 1, "gps ok");
+      #else
+        lcdMessage(0, 1, masterip.toString());
+      #endif
+    }
+    if (ros_connected) {
+      lcdMessage(0, 2, "connected");
+    } else {
+      lcdMessage(0, 2, "not connected");
+    }
+  }
 }
 
 void blinkLedBuiltin() {
@@ -833,9 +947,64 @@ void setup() {
 
 	nh.subscribe(cmdVelSubscribe);
 	nh.advertise(encoderPublisher);
+
   #ifdef ENABLE_GPS
 	  nh.advertise(gpsPublisher);
+    gps_status_msg.satellites_used = 0;
+    gps_status_msg.status = -1;
+    gps_status_msg.motion_source = 1;
+    gps_status_msg.orientation_source = 0;
+    gps_status_msg.position_source = 1;
+
+    gps_msg.header.frame_id = gps_frameid;
+    gps_msg.latitude = 0;
+    gps_msg.longitude = 0;
+    gps_msg.altitude = 0;
+    gps_msg.track = 0;
+    gps_msg.speed = 0;
+    gps_msg.climb = 0;
+    gps_msg.pitch = 0;
+    gps_msg.roll = 0;
+    gps_msg.dip = 0;
+    gps_msg.time = 0;
+    gps_msg.gdop = 0;
+    gps_msg.pdop = 0;
+    gps_msg.hdop = 0;
+    gps_msg.vdop = 0;
   #endif
+
+  #ifdef ENABLE_MPU6050
+    nh.advertise(imuPublisher);
+    
+    imu_data.header.frame_id = imu_frameid;
+    imu_data.orientation.x = 0.0;
+    imu_data.orientation.y = 0.0;
+    imu_data.orientation.z = 0.0;
+    imu_data.orientation.w = 0.0;
+    
+    imu_data.orientation_covariance[0] = 0.0;
+    imu_data.orientation_covariance[4] = 0.0;
+    imu_data.orientation_covariance[8] = 0.0;
+
+    // should be in m/s^2.
+    imu_data.linear_acceleration.x = 0.0;
+    imu_data.linear_acceleration.y = 0.0;
+    imu_data.linear_acceleration.z = 0.0;
+    
+    imu_data.linear_acceleration_covariance[0] = 0.0;
+    imu_data.linear_acceleration_covariance[4] = 0.0;
+    imu_data.linear_acceleration_covariance[8] = 0.0;
+
+    // Should be in rad/sec.
+    imu_data.angular_velocity.x = 0.0;
+    imu_data.angular_velocity.y = 0.0;
+    imu_data.angular_velocity.z = 0.0;
+
+    imu_data.angular_velocity_covariance[0] = 0;
+    imu_data.angular_velocity_covariance[4] = 0;
+    imu_data.angular_velocity_covariance[8] = 0;
+
+  #endif 
   nh.subscribe(sub_dir);
   nh.subscribe(sub_vel);
 
@@ -910,20 +1079,13 @@ void loop() {
 		}
 	}
 	
-  	// set speed  
-	// if(setPwmStatus) {    
-	// 	leftMotorPwmOut = leftMotorPwmOutCmd;
-	//  setPwmStatus = false;
-	// } else {
-    leftMotorPwmOut = 0;
-    if(leftSpeedPidSetPoint != 0) {
-      leftMotorPwmOut = leftSpeedPidOutput * leftSpeedPidSetPointDirection; // - steeringPidOutput;
-    }
-	//
-	//  }
+  leftMotorPwmOut = 0;
+  if(leftSpeedPidSetPoint != 0) {
+    leftMotorPwmOut = leftSpeedPidOutput * leftSpeedPidSetPointDirection; // - steeringPidOutput;
+  }
 
-  	update_PID();
-  	bodyMotorsControl();
+  update_PID();
+  bodyMotorsControl();
 
 	// speed calculation m/s, on second
 	if(millis() >= secondTimer) {
@@ -965,19 +1127,30 @@ void loop() {
     while (Serial2.available() > 0)
       if (gps.encode(Serial2.read())) {
         if (gps.location.isValid()) {
-          gps_lat = gps.location.lat();
-          gps_lng = gps.location.lng();
+          gps_lat = gps.location.lat();         // double > f64
+          gps_lng = gps.location.lng();         // double > f64
+          gps_time = gps.time.value();          // u32 > f64
+          gps_speed = gps.speed.mps();          // double > f64
+          gps_altitude = gps.altitude.meters(); // double > f64
+          gps_course = gps.course.deg();        // double > f64
+          gps_satellites = gps.satellites.value(); // u32 >
+          gps_hdop = gps.hdop.value();          // i32 > f64 
+
           Serial.print(gps_lat, 6);
           Serial.print(F(","));
           Serial.println(gps_lng, 6);
+
+          gps_status = 2;
         } else {
           Serial.println(F("gps invalid, wait for sattelites"));
+          gps_status = 1;
         }        
       }
 
     if (millis() > 5000 && gps.charsProcessed() < 10) {
+      gps_status = 0;
       Serial.println(F("No GPS detected: check wiring."));
-      while(true);
+      //while(true);
     }
   #endif
 
@@ -1002,22 +1175,18 @@ void loop() {
     gpsPub();
   #endif
 
-  blinkLedBuiltin();
-
-  // update display
-	static long unsigned int displayTimer = 0;
-	if(millis() >= displayTimer) {
-		displayTimer = millis() + 1000;
-    lcdMessage(1, 0, ip.toString());
-    lcdMessage(0, 1, masterip.toString());
-    if (!nh.connected()) {
-      lcdMessage(0, 2, "not connected");
-      led_time = LED_TIMER_NOT_CONNECTED;
-    } else {
-      lcdMessage(0, 2, "connected");
-      led_time = LED_TIMER_CONNECTED;
-    }
+  // check connection to master (rosserial)
+  if (!nh.connected()) {
+    ros_connected = false;
+    led_time = LED_TIMER_NOT_CONNECTED;
+  } else {
+    ros_connected = true;
+    led_time = LED_TIMER_CONNECTED;
   }
+
+  lcdUpdate();
+
+  blinkLedBuiltin();
 
   nh.spinOnce();
 }
